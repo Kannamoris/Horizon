@@ -147,7 +147,7 @@ export class IndexedStore implements PermanentIndexedStore {
     };
 
     return existing
-      ? _.merge(
+      ? _.mergeWith(
           existing,
           data,
           _.pick(existing, [
@@ -157,7 +157,10 @@ export class IndexedStore implements PermanentIndexedStore {
             'images',
             'friends',
             'groups'
-          ])
+          ]),
+          (objValue: unknown, srcValue: unknown) => {
+            if (Array.isArray(srcValue)) return srcValue;
+          }
         )
       : data;
   }
