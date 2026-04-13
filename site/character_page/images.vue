@@ -145,7 +145,7 @@
           <div class="d-flex info-buttons flex-wrap">
             <div class="input-group w-auto buttons-numbers">
               <span
-                class="image-preview-numbers input-group-text font-monospace"
+                class="image-preview-numbers input-group-text bg-body-tertiary font-monospace"
                 v-if="images.length > 1"
               >
                 {{ `${images.indexOf(previewImage) + 1}/${images.length}` }}
@@ -184,15 +184,15 @@
               >
                 <i class="fa-solid fa-magnifying-glass-minus"></i>
               </button>
-              <input
-                type="number"
-                class="form-control zoom-number"
-                placeholder=""
-                v-model.number="zoomLevel"
-                :min="getZoomMin()"
-                :max="getZoomMax()"
-              />
-              <label class="input-group-text zoom-range-container">
+
+              <label
+                class="input-group-text bg-body-tertiary zoom-number font-monospace"
+              >
+                {{ `${zoomLevel}%` }}
+              </label>
+              <label
+                class="input-group-text bg-body-tertiary zoom-range-container"
+              >
                 <input
                   type="range"
                   class="form-range zoom-range"
@@ -294,10 +294,17 @@
   watch(
     () => props.character,
     () => {
+      const wasShown = shown.value;
+
       hidePreview();
       shown.value = false;
       images.value = [];
       loading.value = true;
+      //The character prop can sometimes update while the image tab is active (ie, with automated periodic profile data refreshes).
+      //This resolves the issue where images are permanently shown as 'loading' after this refresh by re-resolving the image list.
+      if (wasShown) {
+        show();
+      }
     }
   );
   watch(
@@ -655,6 +662,7 @@
       }, FORCE_SHOW_INFO_TIMEOUT);
     }
     forceShowInfo.value = true;
+    copySuccess.value = false;
   };
 
   const showHoverPreview = (image: CharacterImage): void => {
