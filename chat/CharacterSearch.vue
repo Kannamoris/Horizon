@@ -53,16 +53,33 @@
         Searching for <span>{{ searchString }}</span>
       </div>
 
-      <div class="btn-group">
-        <button
-          class="btn btn-outline-secondary"
-          @click.prevent="showHistory()"
+      <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+        <div class="btn-group">
+          <button
+            class="btn btn-outline-secondary"
+            @click.prevent="showHistory()"
+          >
+            History
+          </button>
+          <button class="btn btn-outline-secondary" @click.prevent="reset()">
+            Reset
+          </button>
+        </div>
+
+        <div
+          v-if="currentChannelMemberNames !== null"
+          class="form-check mb-0 ms-1"
         >
-          History
-        </button>
-        <button class="btn btn-outline-secondary" @click.prevent="reset()">
-          Reset
-        </button>
+          <input
+            class="form-check-input"
+            type="checkbox"
+            id="filterByChannel"
+            v-model="filterByChannel"
+          />
+          <label class="form-check-label" for="filterByChannel">
+            Filter to current channel
+          </label>
+        </div>
       </div>
 
       <search-history
@@ -79,15 +96,32 @@
         </button>
       </div>
 
-      <h4 v-if="hasReceivedResults">
-        {{ results.length }} {{ l('characterSearch.results') }}
+      <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+        <h4 class="mb-0" v-if="hasReceivedResults">
+          {{ results.length }} {{ l('characterSearch.results') }}
 
-        <span v-if="resultsPending > 0" class="pending"
-          >Scoring {{ resultsPending }}...
-          <i class="fas fa-circle-notch fa-spin search-spinner"></i
-        ></span>
-      </h4>
-      <h4 v-else>Searching...</h4>
+          <span v-if="resultsPending > 0" class="pending"
+            >Scoring {{ resultsPending }}...
+            <i class="fas fa-circle-notch fa-spin search-spinner"></i
+          ></span>
+        </h4>
+        <h4 class="mb-0" v-else>Searching...</h4>
+
+        <div
+          v-if="currentChannelMemberNames !== null"
+          class="form-check mb-0 ms-2"
+        >
+          <input
+            class="form-check-input"
+            type="checkbox"
+            id="filterByChannelResults"
+            v-model="filterByChannel"
+          />
+          <label class="form-check-label" for="filterByChannelResults">
+            Filter to current channel
+          </label>
+        </div>
+      </div>
 
       <div
         v-for="record in results"
@@ -149,6 +183,7 @@
   import {
     Character,
     Connection,
+    Conversation,
     ExtendedSearchData,
     SearchData,
     SearchKink,
@@ -251,6 +286,8 @@
           null,
           2
         ),
+        filterByChannel: false,
+        allResults: [] as SearchResult[],
         countUpdater: undefined as ResultCountUpdater | undefined,
         data: {
           kinks: [],
@@ -280,9 +317,17 @@
     computed: {
       showAvatars(): boolean {
         return core.state.settings.showAvatars;
+      },
+      currentChannelMemberNames(): Set<string> | null {
+        const conv = core.conversations.selectedConversation;
+        if (!Conversation.isChannel(conv)) return null;
+        return new Set(Object.keys(conv.channel.members));
       }
     },
     watch: {
+      filterByChannel(): void {
+        if (this.state === 'results') this.resort();
+      },
       data: {
         deep: true,
         handler(): void {
@@ -366,27 +411,26 @@
             x =>
               core.state.hiddenUsers.indexOf(x.character.name) === -1 &&
               !x.character.isIgnored
-          )
-          .filter(
-            x =>
-              this.isSpeciesMatch(x) &&
-              this.isBodyTypeMatch(x) &&
-              !this.isSmartFiltered(x)
-          )
-          .sort(sort);
+          );
 
-        // pre-warm cache
-        await Bluebird.mapSeries(results, c =>
+        // pre-warm cache for candidates that pass static filters
+        const warmCandidates = results.filter(
+          x =>
+            this.isSpeciesMatch(x) &&
+            this.isBodyTypeMatch(x) &&
+            !this.isSmartFiltered(x)
+        );
+        await Bluebird.mapSeries(warmCandidates, c =>
           core.cache.profileCache.get(c.character.name)
         );
 
+        this.allResults = results;
         this.resultsPending = this.countPendingResults(undefined, results);
 
         this.countUpdater?.start();
 
         // this is done LAST to force Vue to wait with rendering
         this.hasReceivedResults = true;
-        this.results = results;
 
         this.resort(results);
       });
@@ -456,14 +500,21 @@
 
         console.log('Done!');
       },
-      resort(results = this.results) {
+      isChannelMember(result: SearchResult): boolean {
+        if (!this.filterByChannel) return true;
+        const members = this.currentChannelMemberNames;
+        if (!members) return true;
+        return members.has(result.character.name);
+      },
+      resort(results = this.allResults) {
         this.results = (
           _.filter(
             results,
             x =>
               this.isSpeciesMatch(x) &&
               this.isBodyTypeMatch(x) &&
-              !this.isSmartFiltered(x)
+              !this.isSmartFiltered(x) &&
+              this.isChannelMember(x)
           ) as SearchResult[]
         ).sort(sort);
       },
