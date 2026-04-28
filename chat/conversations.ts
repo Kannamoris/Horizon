@@ -281,6 +281,15 @@ abstract class Conversation implements Interfaces.Conversation {
   protected formatEiconMessage(message: string): string {
     const eIconRegex =
       /^(?!\n)(?=.*\[eicon\].*\[\/eicon\].*\n.*\[eicon\].*\[\/eicon\])(.*\n\[eicon\].*\[\/eicon\].*)\s*/;
+
+    if (/^\/me\s+/i.test(message)) {
+      const body = message.replace(/^\/me\s+/i, '');
+      if (eIconRegex.test(body)) {
+        return '/me\n' + body;
+      }
+      return message;
+    }
+
     if (eIconRegex.test(message)) {
       return '\n' + message;
     }
@@ -354,7 +363,9 @@ class PrivateConversation
       }
       if (this !== state.selectedConversation || !state.windowFocused) {
         this.unread = unreadState;
-        this.unreadCount++;
+        if (this.unread === Interfaces.UnreadState.Mention) {
+          this.unreadCount++;
+        }
       }
       this.typingStatus = 'clear';
     }
@@ -1348,8 +1359,7 @@ export default function (this: any): Interfaces.State {
     const char = core.characters.get(data.character);
     const conv = state.channelMap[data.channel.toLowerCase()];
     if (conv === undefined) return core.channels.leave(data.channel);
-    if (char.isIgnored || core.state.hiddenUsers.indexOf(char.name) !== -1)
-      return;
+    if (char.isIgnored || core.isHidden(char.name)) return;
 
     const msg = new Message(
       MessageType.Ad,
