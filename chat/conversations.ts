@@ -35,9 +35,10 @@ const CONVERSATION_CACHE_UPDATE_FREQ_IN_MS = 1000;
 /**
  * @constant
  * How long the startup auto-join must be quiet (no new channel join arriving)
- * before pinned channels that never joined are treated as removed and pruned.
+ * before pinned channels that never joined are checked against fresh server
+ * channel lists and pruned only if those lists prove they no longer exist.
  * The timer resets on every successful join, so a slow connection that delivers
- * joins gradually keeps deferring the cleanup until the joins actually stop.
+ * joins gradually keeps deferring the check until the joins actually stop.
  */
 const PINNED_CLEANUP_SETTLE_IN_MS = 10000;
 
@@ -792,6 +793,7 @@ class State implements Interfaces.State {
   channelGroups: Interfaces.ChannelGroup[] = [];
   pinnedCleanupTimer?: ReturnType<typeof setTimeout>;
   pinnedCleanupArmed = false;
+  pendingPruneLists?: { cha: boolean; ors: boolean };
 
   get channelGroupAssignments(): { [channelId: string]: string } {
     const map: { [id: string]: string } = emptyMap();
@@ -858,32 +860,67 @@ class State implements Interfaces.State {
   }
 
   /**
-   * Arms (or, if already armed, restarts) the settle timer that prunes pinned
+   * Arms (or, if already armed, restarts) the settle timer that checks pinned
    * channels which failed to join. Called once after the startup auto-join and
-   * again on every successful join, so the prune only runs once joins have
-   * stopped arriving — never while a slow connection is still delivering them.
+   * again on every successful join, so the check only runs once joins have
+   * stopped arriving, never while a slow connection is still delivering them.
    */
   schedulePinnedCleanup(): void {
     if (!this.pinnedCleanupArmed) return;
     clearTimeout(this.pinnedCleanupTimer);
     this.pinnedCleanupTimer = setTimeout(() => {
       this.pinnedCleanupArmed = false;
-      this.pruneRemovedChannels();
+      this.requestPruneCheck();
     }, PINNED_CLEANUP_SETTLE_IN_MS);
   }
 
   /**
-   * Removes pinned/grouped channels that could not be joined on startup. FServ
-   * does not report failed joins, so once the startup join burst has settled,
-   * any grouped channel that never produced a live conversation is treated as
-   * removed server-side. Mirrors the pre-grouping behavior where the pinned
-   * list was re-derived from live conversations, and additionally tells the
-   * user which channels were dropped.
+   * Starts the evidence check for pinned/grouped channels that failed to join
+   * by requesting fresh channel lists from the server. The prune itself runs
+   * once both lists have arrived (see onPruneListArrived) and only removes
+   * channels those lists prove no longer exist, so a channel whose join is
+   * merely slow is never touched.
+   */
+  requestPruneCheck(): void {
+    if (!core.connection.isOpen) return;
+    const unjoined = Object.keys(this.channelGroupAssignments).some(
+      id => this.channelMap[id] === undefined
+    );
+    if (!unjoined) return;
+    this.pendingPruneLists = { cha: false, ors: false };
+    core.channels.requestChannelsIfNeeded(0);
+  }
+
+  /**
+   * Tracks the arrival of the CHA/ORS responses for a pending prune check and
+   * runs the prune once both lists are in. The channels module registers its
+   * CHA/ORS handlers before this one, so the lists are already updated when
+   * the prune looks channels up in them.
+   */
+  onPruneListArrived(list: 'cha' | 'ors'): void {
+    const pending = this.pendingPruneLists;
+    if (pending === undefined) return;
+    pending[list] = true;
+    if (!pending.cha || !pending.ors) return;
+    this.pendingPruneLists = undefined;
+    this.pruneRemovedChannels();
+  }
+
+  /**
+   * Removes pinned/grouped channels that no longer exist server-side. FServ
+   * does not report failed joins, so once the startup join burst has settled
+   * and fresh channel lists have arrived, any grouped channel that never
+   * produced a live conversation and is absent from those lists is treated as
+   * removed. Mirrors the pre-grouping behavior where the pinned list was
+   * re-derived from live conversations, and additionally tells the user which
+   * channels were dropped.
    */
   pruneRemovedChannels(): void {
     if (!core.connection.isOpen) return;
     const removed = Object.keys(this.channelGroupAssignments).filter(
-      id => this.channelMap[id] === undefined
+      id =>
+        this.channelMap[id] === undefined &&
+        core.channels.getChannelItem(id) === undefined
     );
     if (removed.length === 0) return;
     this.syncGroupChannels();
@@ -1309,6 +1346,7 @@ export default function (this: any): Interfaces.State {
   connection.onEvent('connecting', async isReconnect => {
     state.pinnedCleanupArmed = false;
     clearTimeout(state.pinnedCleanupTimer);
+    state.pendingPruneLists = undefined;
     state.channelConversations = [];
     state.channelMap = emptyMap();
     if (!isReconnect) {
@@ -1328,11 +1366,18 @@ export default function (this: any): Interfaces.State {
       state.getPrivate(core.characters.get(item));
     queuedJoin(state.pinned.channels.slice());
     // Arm the settle timer; it restarts on every join (see the join handler
-    // below) and only fires once joins have stopped arriving, then prunes any
-    // pinned channels that never joined (removed server-side).
+    // below) and only fires once joins have stopped arriving, then checks any
+    // pinned channels that never joined against fresh server channel lists.
     state.pinnedCleanupArmed = true;
     state.schedulePinnedCleanup();
   });
+  connection.onEvent('closed', () => {
+    state.pinnedCleanupArmed = false;
+    clearTimeout(state.pinnedCleanupTimer);
+    state.pendingPruneLists = undefined;
+  });
+  connection.onMessage('CHA', async () => state.onPruneListArrived('cha'));
+  connection.onMessage('ORS', async () => state.onPruneListArrived('ors'));
   core.channels.onEvent(async (type, channel, member) => {
     if (type === 'join')
       if (member === undefined) {
@@ -1340,8 +1385,8 @@ export default function (this: any): Interfaces.State {
         state.channelMap[channel.id] = conv;
         state.channelConversations.push(conv);
         void state.savePinned();
-        // A pinned channel joined: defer the dead-channel cleanup until the
-        // join burst goes quiet, so slow connections aren't pruned mid-join.
+        // A pinned channel joined: defer the dead-channel check until the
+        // join burst goes quiet, so slow connections aren't checked mid-join.
         state.schedulePinnedCleanup();
         const index = state.recentChannels.findIndex(
           c => c.channel === channel.id
