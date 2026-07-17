@@ -42,6 +42,18 @@ const CONVERSATION_CACHE_UPDATE_FREQ_IN_MS = 1000;
  */
 const PINNED_CLEANUP_SETTLE_IN_MS = 10000;
 
+/**
+ * @constant
+ * How long joins must stay quiet after the fresh channel lists have arrived
+ * before grouped channels missing from those lists are pruned. Matches the
+ * client's ping stale threshold (see the pin timeout in fchat/connection.ts):
+ * a connection that survives this long is demonstrably alive, so a channel
+ * that still has not joined and is absent from the lists is gone for good.
+ * The long fuse also covers invite-only rooms, which never appear in ORS and
+ * so cannot be proven alive by the lists.
+ */
+const PINNED_PRUNE_GRACE_IN_MS = 90000;
+
 function createMessage(
   this: any,
   type: MessageType,
@@ -866,19 +878,25 @@ class State implements Interfaces.State {
    * again on every successful join, so the check only runs once joins have
    * stopped arriving, never while a slow connection is still delivering them.
    * Runs in two phases: the first quiet window requests fresh channel lists,
-   * and once those have arrived a second quiet window runs the prune, so the
-   * removal notice never appears while joins are still being processed.
+   * and once those have arrived the longer grace window runs the prune, so
+   * the removal notice never appears while joins are still being processed
+   * and invite-only rooms get the full grace period to join.
    */
   schedulePinnedCleanup(): void {
     if (!this.pinnedCleanupArmed) return;
     clearTimeout(this.pinnedCleanupTimer);
-    this.pinnedCleanupTimer = setTimeout(() => {
-      this.pinnedCleanupArmed = false;
-      if (this.pruneEvidenceReady) {
-        this.pruneEvidenceReady = false;
-        this.pruneRemovedChannels();
-      } else this.requestPruneCheck();
-    }, PINNED_CLEANUP_SETTLE_IN_MS);
+    this.pinnedCleanupTimer = setTimeout(
+      () => {
+        this.pinnedCleanupArmed = false;
+        if (this.pruneEvidenceReady) {
+          this.pruneEvidenceReady = false;
+          this.pruneRemovedChannels();
+        } else this.requestPruneCheck();
+      },
+      this.pruneEvidenceReady
+        ? PINNED_PRUNE_GRACE_IN_MS
+        : PINNED_CLEANUP_SETTLE_IN_MS
+    );
   }
 
   /**
@@ -903,8 +921,9 @@ class State implements Interfaces.State {
    * The channels module registers its CHA/ORS handlers before this one, so
    * the lists are already updated when the prune looks channels up in them.
    * Once both lists are in, the prune is not run immediately: joins received
-   * before the lists may still be mid-processing, so the settle timer is
-   * re-armed and the prune runs after the join burst has gone quiet again.
+   * before the lists may still be mid-processing, so the timer is re-armed
+   * with the grace window and the prune runs once joins have stayed quiet
+   * for that long.
    */
   onPruneListArrived(list: 'cha' | 'ors'): void {
     const pending = this.pendingPruneLists;
