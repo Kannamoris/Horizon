@@ -794,6 +794,7 @@ class State implements Interfaces.State {
   pinnedCleanupTimer?: ReturnType<typeof setTimeout>;
   pinnedCleanupArmed = false;
   pendingPruneLists?: { cha: boolean; ors: boolean };
+  pruneEvidenceReady = false;
 
   get channelGroupAssignments(): { [channelId: string]: string } {
     const map: { [id: string]: string } = emptyMap();
@@ -864,13 +865,19 @@ class State implements Interfaces.State {
    * channels which failed to join. Called once after the startup auto-join and
    * again on every successful join, so the check only runs once joins have
    * stopped arriving, never while a slow connection is still delivering them.
+   * Runs in two phases: the first quiet window requests fresh channel lists,
+   * and once those have arrived a second quiet window runs the prune, so the
+   * removal notice never appears while joins are still being processed.
    */
   schedulePinnedCleanup(): void {
     if (!this.pinnedCleanupArmed) return;
     clearTimeout(this.pinnedCleanupTimer);
     this.pinnedCleanupTimer = setTimeout(() => {
       this.pinnedCleanupArmed = false;
-      this.requestPruneCheck();
+      if (this.pruneEvidenceReady) {
+        this.pruneEvidenceReady = false;
+        this.pruneRemovedChannels();
+      } else this.requestPruneCheck();
     }, PINNED_CLEANUP_SETTLE_IN_MS);
   }
 
@@ -892,10 +899,12 @@ class State implements Interfaces.State {
   }
 
   /**
-   * Tracks the arrival of the CHA/ORS responses for a pending prune check and
-   * runs the prune once both lists are in. The channels module registers its
-   * CHA/ORS handlers before this one, so the lists are already updated when
-   * the prune looks channels up in them.
+   * Tracks the arrival of the CHA/ORS responses for a pending prune check.
+   * The channels module registers its CHA/ORS handlers before this one, so
+   * the lists are already updated when the prune looks channels up in them.
+   * Once both lists are in, the prune is not run immediately: joins received
+   * before the lists may still be mid-processing, so the settle timer is
+   * re-armed and the prune runs after the join burst has gone quiet again.
    */
   onPruneListArrived(list: 'cha' | 'ors'): void {
     const pending = this.pendingPruneLists;
@@ -903,7 +912,9 @@ class State implements Interfaces.State {
     pending[list] = true;
     if (!pending.cha || !pending.ors) return;
     this.pendingPruneLists = undefined;
-    this.pruneRemovedChannels();
+    this.pruneEvidenceReady = true;
+    this.pinnedCleanupArmed = true;
+    this.schedulePinnedCleanup();
   }
 
   /**
@@ -1350,6 +1361,7 @@ export default function (this: any): Interfaces.State {
     state.pinnedCleanupArmed = false;
     clearTimeout(state.pinnedCleanupTimer);
     state.pendingPruneLists = undefined;
+    state.pruneEvidenceReady = false;
     state.channelConversations = [];
     state.channelMap = emptyMap();
     if (!isReconnect) {
@@ -1378,6 +1390,7 @@ export default function (this: any): Interfaces.State {
     state.pinnedCleanupArmed = false;
     clearTimeout(state.pinnedCleanupTimer);
     state.pendingPruneLists = undefined;
+    state.pruneEvidenceReady = false;
   });
   connection.onMessage('CHA', async () => state.onPruneListArrived('cha'));
   connection.onMessage('ORS', async () => state.onPruneListArrived('ors'));
