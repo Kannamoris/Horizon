@@ -923,7 +923,10 @@ class State implements Interfaces.State {
         core.channels.getChannelItem(id) === undefined
     );
     if (removed.length === 0) return;
-    this.syncGroupChannels();
+    // Splice out only the evidenced channels. Rebuilding groups from live
+    // conversations (syncGroupChannels) would silently drop channels whose
+    // join messages are still being processed when the lists arrive.
+    for (const id of removed) this.removeChannelFromGroups(id);
     void this.saveChannelGroups();
     void this.savePinned();
     const links = removed.map(id => {
